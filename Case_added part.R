@@ -1,6 +1,7 @@
 rm(list=ls())
 library(vars)
 library(xts)
+library(bootUR)
 
 #load the dataset
 FRED_url <- url("https://files.stlouisfed.org/files/htdocs/fred-md/monthly/current.csv")
@@ -52,7 +53,7 @@ lag_selection <- VARselect(var_data, lag.max = 20, type = "const")
 print(lag_selection)
 
 #estimate the VAR model with taking BIC as information criterion
-lag_order <- 3  
+lag_order <- 3
 var_model <- VAR(var_data, p = lag_order, type = "const")
 summary(var_model)
 #Model: Where IND is the growth rate of the IP index, the CPI is the change in the growth rate of CPI (all items), and the FED is the change in the effective federal funds rate
@@ -64,24 +65,42 @@ summary(var_model)
 #test to check for serial correlation in the residuals in a VAR model
 serial_test <- serial.test(var_model, type = "BG")
 print(serial_test)
-plot(serial_test)
 
 
 #Test for heteroscedasticity of residuals
 arch_test <- arch.test(var_model, multivariate.only = FALSE)
 print(arch_test)
-plot(arch_test)
 
-#Test Residuals for normality
-normality_test <- normality.test(var_model,  multivariate.only = FALSE)
-print(normality_test)
-plot(normality_test)
+#Test model for stability
+stability <- roots(var_model)
+print(stability)
+# Verify if all roots are less than 1
+all(abs(stability) < 1)
 
+#Test for Zero-Mean of Residuals
+modelresiduals <- residuals(var_model)
+t.test(modelresiduals, mu = 0)
 
+#Test for stationarity
+adf(Ind_stat)
+adf(Cpi_stat)
+adf(Fed_stat)
 
 # Exercise 3 --------------------------------------------------------------
 
 #Explanation what Granger causality means...
+
+#Function from vars Package. Cannot use it as it is designed for bivariate models. You can specify the cause but not
+#the other variable.
+#Null: y1t does not Granger cause y2t and y3t <-> a21,i = a31,i = 0 for i=1,2,3
+grangercauses <- causality(var_model, cause = "Ind_stat")
+print(grangercauses)
+
+grangercauses_2 <- causality(var_model, cause = "Cpi_stat")
+print(grangercauses_2)
+
+grangercauses_3 <- causality(var_model, cause = "Fed_stat")
+print(grangercauses_3)
 
 #Granger tests
 #Null: variable Y does NOT granger cause variable X for grangertest(X~Y)
@@ -105,6 +124,53 @@ print(Cpi_causes_Fed) #NO REJECTION, SO NO GRANGER CAUSALITY
 
 #Hence, the growth rate of the IP index granger causes the change in the effective federal funds rate 
 #And, the change in the effective federal funds rate granger causes the change in the growth rate of CPI (all items)
+
+#Do the Granger Test manually
+granger_test_manual <- function(y, x, lags) {
+  
+  y_lagged <- embed(y, lags + 1)
+  x_lagged <- embed(x, lags + 1)
+  
+  y_data <- as.data.frame(y_lagged)
+  colnames(y_data) <- paste0("y_lag", 0:lags)  # Name columns for y
+  
+  x_data <- as.data.frame(x_lagged)
+  colnames(x_data) <- paste0("x_lag", 0:lags)  # Name columns for x
+  
+  # Restricted Model: Use all lags of y
+  restricted_model <- lm(y_lag0 ~ . - 1, data = y_data)  # y_lag0 is the dependent variable
+  RSS_restricted <- sum(residuals(restricted_model)^2)
+  
+  # Unrestricted Model: Use all lags of y and all lags of x
+  combined_data <- cbind(y_data, x_data[,-1])  # Combine y and x lagged data (exclude x_lag0)
+  unrestricted_model <- lm(y_lag0 ~ . - 1, data = combined_data)
+  RSS_unrestricted <- sum(residuals(unrestricted_model)^2)
+  
+  m <- lags  # Number of lags of the independent variable
+  T <- nrow(y_lagged)  # Number of observations
+  k <- length(coefficients(unrestricted_model))  # Total number of parameters in the unrestricted model
+  
+  F_stat <- ((RSS_restricted - RSS_unrestricted) / m) / (RSS_unrestricted / (T - k))
+  
+  p_value <- pf(F_stat, df1 = m, df2 = T - k, lower.tail = FALSE)
+  
+  cat("Granger Causality Test Results\n")
+  cat("----------------------------------\n")
+  cat("F-statistic:", F_stat, "\n")
+  cat("P-value:", p_value, "\n")
+  if (p_value < 0.05) {
+    cat("Conclusion: Reject the null hypothesis at 5% - x Granger-causes y\n")
+  } else {
+    cat("Conclusion: Fail to reject the null hypothesis at 5% - x does not Granger-cause y\n")
+  }
+}
+
+granger_test_manual(Ind_stat, Cpi_stat, 3)
+granger_test_manual(Cpi_stat, Ind_stat, 3)
+granger_test_manual(Cpi_stat, Fed_stat, 3)
+granger_test_manual(Fed_stat, Cpi_stat, 3)
+granger_test_manual(Ind_stat, Fed_stat, 3)
+granger_test_manual(Fed_stat, Ind_stat, 3)
 
 
 # Exercise 4 --------------------------------------------------------------
@@ -426,4 +492,64 @@ mtext(
   outer = TRUE, 
   cex = 1.5
 )
+#Exercise 6 -----------------------------------------------
+amat <- matrix(c(
+  1,  0,  0,    # Ind_stat affects only itself contemporaneously
+  NA, 1,  0,    # Cpi_stat reacts to Ind_stat, but not Fed_stat immediately
+  NA, NA, 1     # Fed_stat reacts to Ind_stat and Cpi_stat contemporaneously
+), byrow = TRUE, nrow = 3)
 
+var_data <- cbind(Ind_stat, Cpi_stat, Fed_stat)
+var_data <- var_data[-(1:2)]
+var_model <- VAR(var_data, p = lag_order, type = "const")
+
+svar_model <- SVAR(var_model, Amat = amat, max.iter = 1000)
+print(svar_model)
+
+irf_Cpi_Ind <- irf(svar_model, impulse = "Ind_stat", response = "Cpi_stat", n.ahead = 5, , boot = TRUE)
+irf_Ind_Cpi <- irf(svar_model, impulse = "Cpi_stat", response = "Ind_stat", n.ahead = 5, , boot = TRUE)
+irf_Fed_Ind <- irf(svar_model, impulse = "Fed_stat", response = "Ind_stat", n.ahead = 5, , boot = TRUE)
+irf_Ind_Fed <- irf(svar_model, impulse = "Ind_stat", response = "Fed_stat", n.ahead = 5, , boot = TRUE)
+irf_Cpi_Fed <- irf(svar_model, impulse = "Cpi_stat", response = "Fed_stat", n.ahead = 5, , boot = TRUE)
+irf_Fed_Cpi <- irf(svar_model, impulse = "Fed_stat", response = "Cpi_stat", n.ahead = 5, , boot = TRUE)
+irf_Fed_Fed <- irf(svar_model, impulse = "Fed_stat", response = "Fed_stat", n.ahead = 5, , boot = TRUE)
+irf_Cpi_Cpi <- irf(svar_model, impulse = "Cpi_stat", response = "Cpi_stat", n.ahead = 5, , boot = TRUE)
+irf_Ind_Ind <- irf(svar_model, impulse = "Ind_stat", response = "Ind_stat", n.ahead = 5, , boot = TRUE)
+
+plot(irf_Cpi_Ind)
+plot(irf_Ind_Cpi)
+plot(irf_Fed_Ind)
+plot(irf_Ind_Fed)
+plot(irf_Cpi_Fed)
+plot(irf_Fed_Cpi)
+plot(irf_Fed_Fed)
+plot(irf_Cpi_Cpi)
+plot(irf_Ind_Ind)
+
+
+var_data <- cbind(Cpi_stat, Ind_stat, Fed_stat)
+var_data <- var_data[-(1:2)]
+var_model <- VAR(var_data, p = lag_order, type = "const")
+
+svar_model <- SVAR(var_model, Amat = amat, max.iter = 1000)
+print(svar_model)
+
+irf_Cpi_Ind <- irf(svar_model, impulse = "Ind_stat", response = "Cpi_stat", n.ahead = 5, , boot = TRUE)
+irf_Ind_Cpi <- irf(svar_model, impulse = "Cpi_stat", response = "Ind_stat", n.ahead = 5, , boot = TRUE)
+irf_Fed_Ind <- irf(svar_model, impulse = "Fed_stat", response = "Ind_stat", n.ahead = 5, , boot = TRUE)
+irf_Ind_Fed <- irf(svar_model, impulse = "Ind_stat", response = "Fed_stat", n.ahead = 5, , boot = TRUE)
+irf_Cpi_Fed <- irf(svar_model, impulse = "Cpi_stat", response = "Fed_stat", n.ahead = 5, , boot = TRUE)
+irf_Fed_Cpi <- irf(svar_model, impulse = "Fed_stat", response = "Cpi_stat", n.ahead = 5, , boot = TRUE)
+irf_Fed_Fed <- irf(svar_model, impulse = "Fed_stat", response = "Fed_stat", n.ahead = 5, , boot = TRUE)
+irf_Cpi_Cpi <- irf(svar_model, impulse = "Cpi_stat", response = "Cpi_stat", n.ahead = 5, , boot = TRUE)
+irf_Ind_Ind <- irf(svar_model, impulse = "Ind_stat", response = "Ind_stat", n.ahead = 5, , boot = TRUE)
+
+plot(irf_Cpi_Ind)
+plot(irf_Ind_Cpi)
+plot(irf_Fed_Ind)
+plot(irf_Ind_Fed)
+plot(irf_Cpi_Fed)
+plot(irf_Fed_Cpi)
+plot(irf_Fed_Fed)
+plot(irf_Cpi_Cpi)
+plot(irf_Ind_Ind)
